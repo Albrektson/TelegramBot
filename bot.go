@@ -2,8 +2,7 @@ package main
 
 import (
 	"fmt"
-	"bitbucket.org/mrd0ll4r/tbotapi"
-	"bitbucket.org/mrd0ll4r/tbotapi/model"
+	"github.com/mrd0ll4r/tbotapi"
 	"net"
 	"strings"
 	"encoding/binary"
@@ -23,7 +22,12 @@ var authkey string = <bot authkey>
 var server string = <server address>
 var port string = <server port to check>
 var defaultChannel int = <chat id>
+var timeZone = "Europe/Stockholm"
+var timeFormat = "15:04 on Jan 2"
+
 var lastStatus int
+var initTime int
+var failedSince time.Time
 
 type Stats struct {
 	version int
@@ -40,14 +44,29 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+	defer bot.Close()
+	
+	initTime = int (time.Now().Unix())
 	
 	go listen(bot)
 	for {
 		if defaultChannel != 0 {
 			status, data := ping(server, port)
-			if status != lastStatus {
+			if status != UP {
+				if failedSince.IsZero() == true {
+					failedSince = time.Now()
+				} else if status != lastStatus {
+					lastStatus = status
+					talk(bot, defaultChannel, status, data)
+				}
+			} else if status != lastStatus {
+				//if the server recovered from a failure, send a message and remove failure timestamp
 				lastStatus = status
+				failedSince = time.Time{} //zero out value
 				talk(bot, defaultChannel, status, data)
+			} else {
+				//in case of one-time failure, just remove failure timestamp
+				failedSince = time.Time{}
 			}
 		}
 		time.Sleep(5 * time.Minute)
@@ -56,24 +75,33 @@ func main() {
 
 func listen(bot *tbotapi.TelegramBotAPI) {
 	for {
-		select {
-		case update := <-bot.Updates:	//we should check timestaps for old backlogged requests
-			mType := update.Message.Type()
-			msg := update.Message
-			text := *msg.Text
-			channel := msg.Chat.ID
-			if mType == model.TextType {
-				if text == "/status"{
-					status, data := ping(server, port)
-					talk(bot, channel, status, data)
-				} else if text == "/start" {
-					send(bot, channel, "Hello.")
-				} else {
-					send(bot, channel, "I can't let you do that, Dave.")
-				}
-
-		case update := <-bot.Errors:
-			fmt.Printf("Err: %s\n", update)
+		input := <-bot.Updates
+		
+		//check for errors
+		err := input.Error()
+		if err != nil {
+			fmt.Printf("Err: %s\n", input)
+			continue
+		}		
+		
+		//handle bot update data
+		update := input.Update()
+		msg := update.Message
+		if msg.Date < initTime {
+			//backlogged message, cancel read
+			continue
+		}
+		text := *msg.Text
+		channel := msg.Chat.ID
+		if msg.Type() == tbotapi.TextMessage {
+			if text == "/status"{
+				status, data := ping(server, port)
+				talk(bot, channel, status, data)
+			} else if text == "/start" {
+				send(bot, channel, "Hello.")
+			} else {
+				send(bot, channel, "I can't let you do that, Dave.")
+			}
 		}
 	}
 }
@@ -92,19 +120,42 @@ func talk(bot *tbotapi.TelegramBotAPI, channel int, status int, data Stats) {
 		send(bot, channel, output)
 
 	case DOWN:
-		send(bot, channel, "I can't reach the server's network at all.")
+		send(bot, channel, "I can't reach the server's network at all. Is the DDNS broken?")
 		
 	case BLOCK:
-		send(bot, channel, "I can reach the server, but not mumble!")
+		var buffer bytes.Buffer
+		buffer.WriteString("I can't reach the server!\n")
+		buffer.WriteString("Server unreachable since ")
+		buffer.WriteString(parseTime(failedSince))
+		output := buffer.String()
+		send(bot, channel, output)
 
 	case FAIL:
 		send(bot, channel, "I've gone tits up! Someone call a doctor?")
 	}
 }
 
+func parseTime(t time.Time) string {
+	loc, _ := time.LoadLocation(timeZone)
+	parsedTime := t.In(loc).Format(timeFormat)
+	return parsedTime
+}
+
 //send a message to a chat
-func send(bot *tbotapi.TelegramBotAPI, chat int, message string) {
-	bot.SendMessage(chat, message)
+func send(bot *tbotapi.TelegramBotAPI, chat int, text string) {
+	recipient := tbotapi.NewChatRecipient(chat)
+	message := bot.NewOutgoingMessage(recipient, markdown(text))
+	message = message.SetMarkdown(true)
+	message.Send()
+}
+
+//convert text to fixedsys markdown text
+func markdown(text string) string {
+	var buffer bytes.Buffer
+	buffer.WriteString("`")
+	buffer.WriteString(text)
+	buffer.WriteString("`")
+	return buffer.String()
 }
 
 func ping(server string, port string) (int, Stats) {
