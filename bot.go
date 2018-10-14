@@ -22,8 +22,10 @@ var authkey string = <bot authkey>
 var server string = <server address>
 var port string = <server port to check>
 var defaultChannel int = <chat id>
+var pingInterval int = 5 //minutes between pings
 var timeZone = "Europe/Stockholm"
 var timeFormat = "15:04 on Jan 2"
+var failLimit int = 20 //minutes before notifying
 
 var lastStatus int
 var initTime int
@@ -55,7 +57,8 @@ func main() {
 			if status != UP {
 				if failedSince.IsZero() == true {
 					failedSince = time.Now()
-				} else if status != lastStatus {
+				} else if status != lastStatus && 
+time.Since(failedSince).Minutes() >= float64(failLimit) {
 					lastStatus = status
 					talk(bot, defaultChannel, status, data)
 				}
@@ -69,7 +72,7 @@ func main() {
 				failedSince = time.Time{}
 			}
 		}
-		time.Sleep(5 * time.Minute)
+		time.Sleep(time.Duration(pingInterval) * time.Minute)
 	}
 }
 
